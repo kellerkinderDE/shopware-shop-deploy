@@ -1,0 +1,46 @@
+.base: &base
+  roles:
+    - app
+  port: 22
+  forwardAgent: true
+  composer_options: install --verbose --prefer-dist --no-progress --no-interaction --no-dev --optimize-autoloader --no-scripts
+
+config:
+  application: "My Shopware Project"
+  console: "bin/console"
+  bin/php: "/usr/bin/php8.2"
+
+hosts:
+  "c-1234.maxcluster.net": # change to your server's host
+s
+    <<: *base
+    remote_user: web-user
+    labels:
+      stage: production
+    branch: main
+    cachetool: /var/run/php8.2-fpm-my.host.tld.sock # change to path of your php socket
+    deploy_path: /var/www/share/my-host.tld # change to your production deployment base path that will contain the releases
+    rsync_src: '{{source_directory}}'
+    rsync_dest: '{{release_path}}'
+
+tasks:
+  deploy:
+    - deploy:info
+    - deploy:setup
+    - deploy:lock
+    - deploy:release
+    - rsync
+    - deploy:shared
+    - deploy:writable
+    - shopware6:check_installed
+    - shopware6:update
+    - shopware6:plugins:install_update
+    - shopware6:bundle:dump
+    - shopware6:theme:compile
+    - shopware6:messenger:stop
+    - deploy:symlink
+    - shopware6:scheduled-tasks
+    - cachetool:clear:opcache
+    - deploy:unlock
+    - deploy:cleanup
+    - deploy:success

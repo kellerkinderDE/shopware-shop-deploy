@@ -1,0 +1,89 @@
+name: Deployment
+
+env:
+  SSH_PRIVATE_KEY: "Private key for ssh connection to deploy server. Add this as a GitHub Action Secret and delete this line"
+  SSH_HOST_KEY: "Host key for ssh connection to deploy server. Get this with `ssh-keyscan -H $DEPLOYMENT_IP`. Add this as a GitHub Action Secret and delete this line"
+  SHOPWARE_COMPOSER_TOKEN: "Personal access token for 'packages.shopware.com'. Add this as a GitHub Action Secret and delete this line"
+  DEPLOYMENT_DIR: "./.deployment"
+  CI: "1" # use `bin/ci` instead of `bin/console`
+  DEPLOYMENT_IP: "127.0.0.1" # adjust with your deploy server IP
+  NPM_CONFIG_ENGINE_STRICT: "false"
+  SHOPWARE_SKIP_THEME_COMPILE: "true"
+  SHOPWARE_ADMIN_BUILD_ONLY_EXTENSIONS: "1"
+  DISABLE_ADMIN_COMPILATION_TYPECHECK: "1"
+  DATABASE_URL: ''
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  cancel-in-progress: true
+  group: deployment
+
+jobs:
+  check-secret:
+    runs-on: ubuntu-latest
+    outputs:
+      shopware-composer-token-exists: ${{ steps.shopware-composer-token.outputs.defined }}
+    steps:
+      - name: Check for Secret availability
+        id: shopware-composer-token
+        shell: bash
+        run: |
+          if [ "${{ secrets.SHOPWARE_COMPOSER_TOKEN }}" != '' ]; then
+            echo "defined=true" >> $GITHUB_OUTPUT;
+          else
+            echo "defined=false" >> $GITHUB_OUTPUT;
+          fi
+
+  deploy-production:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    name: Deploy Production
+    needs: [check-secret]
+    runs-on: ubuntu-latest
+    container:
+      image: kellerkinder/pipeline-image:PHP_8.2-NODE_18
+      options: --user root
+    steps:
+      - uses: shimataro/ssh-key-action@v2
+        with:
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          known_hosts: ${{ secrets.SSH_HOST_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set personal access token for packages.shopware.com
+        if: needs.check-secret.outputs.shopware-composer-token-exists != 'true'
+        run: composer config bearer.packages.shopware.com "${{ secrets.SHOPWARE_COMPOSER_TOKEN }}"
+
+      - name: Determine composer cache directory
+        id: composer
+        run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
+
+      - name: Load composer cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.composer.outputs.dir }}
+          key: composer-${{ hashFiles('./composer.lock') }}
+
+      - name: Install composer dependencies
+        run: composer install --no-interaction --optimize-autoloader --no-scripts --ignore-platform-reqs
+
+      - name: Save composer cache
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.composer.outputs.dir }}
+          key: composer-${{ hashFiles('./composer.lock') }}
+
+      - name: Build JS
+        run: bin/build-js.sh
+
+      - name: Deploy Production
+        working-directory: ${{ env.DEPLOYMENT_DIR }}
+        run: |
+          composer install -no
+          php vendor/bin/dep deploy stage=production -vvv
